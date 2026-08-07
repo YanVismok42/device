@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Вход — Панель Главного</title>
+  <link rel="stylesheet" href="/css/common.css">
+  <style>
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .login-container {
+      width: 100%;
+      max-width: 420px;
+      padding: 50px 40px;
+      background: rgba(15, 15, 15, 0.8);
+      border: 2px solid rgba(153, 237, 255, 0.4);
+      box-shadow: 0 0 40px rgba(153, 237, 255, 0.2);
+    }
+
+    .login-title {
+      font-size: 32px;
+      letter-spacing: 3px;
+      text-align: center;
+      margin-bottom: 40px;
+    }
+
+    .form-group {
+      margin-bottom: 24px;
+    }
+
+    .form-label {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 14px;
+      letter-spacing: 1px;
+    }
+
+    .form-input {
+      width: 100%;
+      padding: 12px 16px;
+      font-size: 16px;
+      background: rgba(10, 10, 10, 0.6);
+    }
+
+    .login-btn {
+      width: 100%;
+      padding: 14px;
+      font-size: 18px;
+      letter-spacing: 2px;
+      background: rgba(153, 237, 255, 0.15);
+      border: 2px solid rgba(153, 237, 255, 0.5);
+      margin-top: 32px;
+      transition: all 0.2s;
+    }
+
+    .login-btn:hover:not(:disabled) {
+      background: rgba(153, 237, 255, 0.25);
+      border-color: rgba(153, 237, 255, 0.7);
+      transform: translateY(-2px);
+    }
+
+    .login-btn:disabled {
+      opacity: 0.4;
+    }
+
+    .error-message {
+      color: #ff6b6b;
+      text-align: center;
+      margin-top: 16px;
+      font-size: 14px;
+      min-height: 20px;
+    }
+
+    .hint {
+      text-align: center;
+      margin-top: 24px;
+      font-size: 13px;
+      opacity: 0.5;
+    }
+  </style>
+</head>
+<body>
+  <div class="login-container glow-border">
+    <h1 class="login-title glow-text">ПАНЕЛЬ ГЛАВНОГО</h1>
+
+    <form id="loginForm">
+      <div class="form-group">
+        <label class="form-label glow-text">Логин</label>
+        <input
+          type="text"
+          class="form-input glow-text"
+          id="username"
+          autocomplete="username"
+          required
+        >
+      </div>
+
+      <div class="form-group">
+        <label class="form-label glow-text">Пароль</label>
+        <input
+          type="password"
+          class="form-input glow-text"
+          id="password"
+          autocomplete="current-password"
+          required
+        >
+      </div>
+
+      <button type="submit" class="login-btn glow-text" id="loginBtn">
+        ВОЙТИ
+      </button>
+
+      <div class="error-message glow-text" id="errorMessage"></div>
+    </form>
+
+    <div class="hint glow-text">
+      Доступ только для Главного
+    </div>
+  </div>
+
+  <script>
+    const form = document.getElementById('loginForm');
+    const usernameInput = document.getElementById('username');
+    const passwordInput = document.getElementById('password');
+    const loginBtn = document.getElementById('loginBtn');
+    const errorMessage = document.getElementById('errorMessage');
+
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+
+      const username = usernameInput.value.trim();
+      const password = passwordInput.value;
+
+      if (!username || !password) {
+        errorMessage.textContent = 'Заполните все поля';
+        return;
+      }
+
+      loginBtn.disabled = true;
+      errorMessage.textContent = '';
+
+      try {
+        const res = await fetch('/api/admin/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password })
+        });
+
+        if (res.ok) {
+          window.location.href = '/admin';
+        } else {
+          const data = await res.json();
+          errorMessage.textContent = 'Неверный логин или пароль';
+          loginBtn.disabled = false;
+        }
+      } catch (err) {
+        errorMessage.textContent = 'Ошибка соединения';
+        loginBtn.disabled = false;
+      }
+    };
+  </script>
+</body>
+</html>

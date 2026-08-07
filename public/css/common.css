@@ -1,0 +1,102 @@
+@font-face {
+  font-family: "Pixel";
+  src: local("Consolas"), local("Monaco"), local("Courier New"), monospace;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: "Pixel", monospace;
+  background: #0a0a0a;
+  color: #99edff;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+.glow-text {
+  text-shadow:
+    0 0 10px rgba(153, 237, 255, 0.8),
+    0 0 20px rgba(153, 237, 255, 0.5),
+    0 0 40px rgba(0, 183, 235, 0.3);
+}
+
+.glow-border {
+  border: 2px solid rgba(153, 237, 255, 0.3);
+  box-shadow:
+    0 0 10px rgba(153, 237, 255, 0.2),
+    inset 0 0 10px rgba(153, 237, 255, 0.1);
+}
+
+button {
+  background: none;
+  border: none;
+  color: #99edff;
+  font-family: "Pixel", monospace;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+button:hover:not(:disabled) {
+  opacity: 0.7;
+}
+
+button:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+input, textarea {
+  background: rgba(15, 15, 15, 0.8);
+  border: 1px solid rgba(153, 237, 255, 0.3);
+  color: #99edff;
+  font-family: "Pixel", monospace;
+  padding: 8px 12px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+input:focus, textarea:focus {
+  border-color: rgba(153, 237, 255, 0.6);
+  box-shadow: 0 0 10px rgba(153, 237, 255, 0.2);
+}
+
+.status-badge {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: bold;
+  letter-spacing: 1px;
+}
+
+.status-pending { background: rgba(255, 193, 7, 0.2); color: #ffc107; }
+.status-active { background: rgba(76, 175, 80, 0.2); color: #4caf50; }
+.status-completed { background: rgba(33, 150, 243, 0.2); color: #2196f3; }
+.status-acknowledged { background: rgba(156, 39, 176, 0.2); color: #9c27b0; }
+
+.loading {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(153, 237, 255, 0.3);
+  border-top-color: #99edff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.fade-in {
+  animation: fadeIn 0.3s ease-in;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}

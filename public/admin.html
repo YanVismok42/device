@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Панель Главного</title>
+  <link rel="stylesheet" href="/css/common.css">
+  <style>
+    body {
+      padding: 0;
+      overflow-x: hidden;
+    }
+
+    .header {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 70px;
+      background: rgba(10, 10, 10, 0.95);
+      backdrop-filter: blur(10px);
+      border-bottom: 2px solid rgba(153, 237, 255, 0.3);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 40px;
+      z-index: 1000;
+    }
+
+    .header-title {
+      font-size: 28px;
+      letter-spacing: 3px;
+      font-weight: bold;
+    }
+
+    .header-actions {
+      display: flex;
+      gap: 20px;
+    }
+
+    .btn {
+      padding: 10px 24px;
+      font-size: 16px;
+      border: 1px solid rgba(153, 237, 255, 0.4);
+      background: rgba(153, 237, 255, 0.05);
+      transition: all 0.2s;
+    }
+
+    .btn:hover:not(:disabled) {
+      background: rgba(153, 237, 255, 0.15);
+      border-color: rgba(153, 237, 255, 0.6);
+    }
+
+    .btn-primary {
+      background: rgba(153, 237, 255, 0.2);
+      border-color: rgba(153, 237, 255, 0.6);
+    }
+
+    .main-container {
+      margin-top: 90px;
+      padding: 20px 40px 40px;
+    }
+
+    .overview-table {
+      width: 100%;
+      border-collapse: collapse;
+      background: rgba(15, 15, 15, 0.6);
+      border: 1px solid rgba(153, 237, 255, 0.2);
+    }
+
+    .overview-table th {
+      background: rgba(153, 237, 255, 0.1);
+      padding: 16px 12px;
+      text-align: left;
+      font-size: 14px;
+      letter-spacing: 1px;
+      border-bottom: 2px solid rgba(153, 237, 255, 0.3);
+    }
+
+    .overview-table td {
+      padding: 14px 12px;
+      border-bottom: 1px solid rgba(153, 237, 255, 0.1);
+      font-size: 14px;
+    }
+
+    .overview-table tbody tr {
+      transition: background 0.2s;
+      cursor: pointer;
+    }
+
+    .overview-table tbody tr:hover {
+      background: rgba(153, 237, 255, 0.05);
+    }
+
+    .prescript-preview {
+      max-width: 300px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      opacity: 0.7;
+      font-size: 13px;
+    }
+
+    .presence {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 12px;
+      letter-spacing: 0.5px;
+    }
+
+    .presence-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: #3a3a3a;
+      flex-shrink: 0;
+    }
+
+    .presence.online .presence-dot {
+      background: #4caf50;
+      box-shadow: 0 0 8px rgba(76, 175, 80, 0.9);
+      animation: presence-pulse 2s infinite;
+    }
+
+    .presence.online {
+      color: #4caf50;
+    }
+
+    .presence.offline {
+      opacity: 0.45;
+    }
+
+    @keyframes presence-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.45; }
+    }
+
+    .last-action {
+      font-size: 11px;
+      opacity: 0.55;
+      margin-top: 5px;
+      white-space: nowrap;
+    }
+
+    .action-cell {
+      display: flex;
+      gap: 8px;
+    }
+
+    .icon-btn {
+      padding: 6px 12px;
+      font-size: 13px;
+      border: 1px solid rgba(153, 237, 255, 0.3);
+    }
+
+    /* Modal */
+    .modal-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.8);
+      backdrop-filter: blur(4px);
+      z-index: 2000;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      overflow-y: auto;
+      padding: 20px;
+    }
+
+    .modal-overlay.active {
+      display: flex;
+    }
+
+    .modal {
+      background: rgba(15, 15, 15, 0.95);
+      border: 2px solid rgba(153, 237, 255, 0.4);
+      box-shadow: 0 0 40px rgba(153, 237, 255, 0.3);
+      max-width: 900px;
+      width: 100%;
+      max-height: 90vh;
+      overflow-y: auto;
+      padding: 30px;
+      margin: auto;
+    }
+
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid rgba(153, 237, 255, 0.2);
+    }
+
+    .modal-title {
+      font-size: 22px;
+      letter-spacing: 2px;
+    }
+
+    .close-btn {
+      font-size: 24px;
+      padding: 4px 12px;
+    }
+
+    .form-group {
+      margin-bottom: 20px;
+    }
+
+    .form-label {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 14px;
+      letter-spacing: 1px;
+    }
+
+    .form-input {
+      width: 100%;
+      padding: 10px 12px;
+      font-size: 14px;
+    }
+
+    /* Editor */
+    .editor-toolbar {
+      display: flex;
+      gap: 4px;
+      padding: 8px;
+      background: rgba(10, 10, 10, 0.8);
+      border: 1px solid rgba(153, 237, 255, 0.3);
+      border-bottom: none;
+      flex-wrap: wrap;
+    }
+
+    .editor-btn {
+      padding: 6px 12px;
+      font-size: 13px;
+      background: rgba(153, 237, 255, 0.05);
+      border: 1px solid rgba(153, 237, 255, 0.2);
+      min-width: 36px;
+      transition: all 0.15s;
+    }
+
+    .editor-btn:hover {
+      background: rgba(153, 237, 255, 0.15);
+    }
+
+    .editor-btn.active {
+      background: rgba(153, 237, 255, 0.25);
+      border-color: rgba(153, 237, 255, 0.5);
+    }
+
+    .btn-link-accent {
+      background: rgba(153, 237, 255, 0.18);
+      border-color: rgba(153, 237, 255, 0.5);
+    }
+
+    .toolbar-sep {
+      width: 1px;
+      background: rgba(153, 237, 255, 0.25);
+      margin: 2px 6px;
+    }
+
+    .editor-hint {
+      font-size: 12px;
+      opacity: 0.55;
+      margin-top: 8px;
+      line-height: 1.5;
+    }
+
+    .field-hint {
+      font-size: 12px;
+      opacity: 0.55;
+      margin-top: 6px;
+    }
+
+    .field-hint.error {
+      opacity: 1;
+      color: #ff6b6b;
+    }
+
+    .editor-content:empty::before {
+      content: attr(data-placeholder);
+      opacity: 0.35;
+      pointer-events: none;
+    }
+
+    .editor-content {
+      width: 100%;
+      min-height: 250px;
+      padding: 16px;
+      font-size: 15px;
+      line-height: 1.6;
+      background: rgba(10, 10, 10, 0.6);
+      border: 1px solid rgba(153, 237, 255, 0.3);
+      outline: none;
+      overflow-y: auto;
+      font-family: "Pixel", monospace;
+    }
+
+    .editor-content:focus {
+      border-color: rgba(153, 237, 255, 0.6);
+      box-shadow: 0 0 10px rgba(153, 237, 255, 0.2);
+    }
+
+    .editor-content p {
+      margin-bottom: 0.8em;
+    }
+
+    .editor-content p:last-child {
+      margin-bottom: 0;
+    }
+
+    .editor-content strong {
+      font-weight: bold;
+      color: #b3f0ff;
+    }
+
+    .editor-content em {
+      font-style: italic;
+      color: #99edff;
+    }
+
+    .editor-content a {
+      color: #6fc3ff;
+      text-decoration: underline;
+    }
+
+    .editor-content ul, .editor-content ol {
+      margin-left: 20px;
+      margin-bottom: 0.8em;
+    }
+
+    .form-actions {
+      display: flex;
+      gap: 12px;
+      justify-content: flex-end;
+      margin-top: 24px;
+    }
+
+    .templates-section {
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid rgba(153, 237, 255, 0.2);
+    }
+
+    .template-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .template-chip {
+      padding: 6px 14px;
+      background: rgba(153, 237, 255, 0.1);
+      border: 1px solid rgba(153, 237, 255, 0.3);
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .template-chip:hover {
+      background: rgba(153, 237, 255, 0.2);
+    }
+
+    .history-section {
+      margin-top: 20px;
+      padding-top: 20px;
+      border-top: 1px solid rgba(153, 237, 255, 0.2);
+    }
+
+    .history-item {
+      padding: 12px;
+      background: rgba(153, 237, 255, 0.05);
+      border: 1px solid rgba(153, 237, 255, 0.2);
+      margin-bottom: 8px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .history-item:hover {
+      background: rgba(153, 237, 255, 0.1);
+    }
+
+    .history-time {
+      font-size: 11px;
+      opacity: 0.6;
+      margin-bottom: 6px;
+    }
+
+    .history-content {
+      font-size: 13px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 60px 20px;
+      opacity: 0.5;
+    }
+
+    .url-input-group {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .url-input-group input {
+      flex: 1;
+    }
+
+    .quick-cell {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .quick-input {
+      width: 190px;
+      padding: 6px 10px;
+      font-size: 13px;
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 30px;
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 12px 28px;
+      background: rgba(15, 15, 15, 0.95);
+      border: 1px solid rgba(153, 237, 255, 0.5);
+      box-shadow: 0 0 20px rgba(153, 237, 255, 0.3);
+      font-size: 14px;
+      z-index: 3000;
+      opacity: 0;
+      transition: opacity 0.25s;
+      pointer-events: none;
+    }
+
+    .toast.show {
+      opacity: 1;
+    }
+
+    .toast.error {
+      border-color: rgba(255, 107, 107, 0.6);
+      color: #ff6b6b;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="header-title glow-text">ПАНЕЛЬ ГЛАВНОГО</div>
+    <div class="header-actions">
+      <button class="btn glow-text" id="newUserBtn">+ Новый участник</button>
+      <button class="btn glow-text" id="templatesBtn">Шаблоны</button>
+    </div>
+  </div>
+
+  <div class="main-container">
+    <table class="overview-table glow-border" id="overviewTable">
+      <thead>
+        <tr class="glow-text">
+          <th>Статус</th>
+          <th>Участник</th>
+          <th>Лобби</th>
+          <th>Прескрипт (превью)</th>
+          <th>Действия</th>
+        </tr>
+      </thead>
+      <tbody id="tableBody" class="glow-text">
+        <tr>
+          <td colspan="5" class="empty-state">Загрузка...</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Edit Modal -->
+  <div class="modal-overlay" id="editModal">
+    <div class="modal glow-border">
+      <div class="modal-header">
+        <div class="modal-title glow-text" id="modalTitle">Редактирование прескрипта</div>
+        <button class="close-btn glow-text" id="closeModalBtn">×</button>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label glow-text">Имя участника:</label>
+        <div class="glow-text" id="modalUsername" style="font-size: 16px; margin-top: 4px;"></div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label glow-text">Ссылка для доступа:</label>
+        <div class="url-input-group">
+          <input type="text" class="form-input glow-text" id="modalAccessUrl" readonly>
+          <button class="btn glow-text" id="copyUrlBtn">Копировать</button>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label glow-text">Название лобби:</label>
+        <input type="text" class="form-input glow-text" id="modalLobbyName">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label glow-text">Прескрипт:</label>
+        <div class="editor-toolbar glow-text">
+          <button type="button" class="editor-btn" data-command="bold" title="Жирный (Ctrl+B)"><strong>Ж</strong></button>
+          <button type="button" class="editor-btn" data-command="italic" title="Курсив (Ctrl+I)"><em>К</em></button>
+          <button type="button" class="editor-btn" data-command="underline" title="Подчёркнутый (Ctrl+U)"><u>П</u></button>
+          <span class="toolbar-sep"></span>
+          <button type="button" class="editor-btn" data-command="insertUnorderedList" title="Список">•&nbsp;Список</button>
+          <button type="button" class="editor-btn" data-command="insertOrderedList" title="Нумерованный список">1.&nbsp;Список</button>
+          <span class="toolbar-sep"></span>
+          <button type="button" class="editor-btn btn-link-accent" id="linkBtn" title="Вставить ссылку (Ctrl+K)">🔗&nbsp;Ссылка</button>
+          <button type="button" class="editor-btn" id="unlinkBtn" title="Убрать ссылку">Убрать ссылку</button>
+          <span class="toolbar-sep"></span>
+          <button type="button" class="editor-btn" data-command="removeFormat" title="Убрать форматирование">✕&nbsp;Формат</button>
+        </div>
+        <div class="editor-content glow-border glow-text" id="editorContent" contenteditable="true" data-placeholder="Напишите прескрипт участнику..."></div>
+        <div class="editor-hint glow-text">
+          Выделите текст и нажмите <b>🔗&nbsp;Ссылка</b> — HTML писать не нужно.
+          Ссылки из буфера вставляются автоматически.
+        </div>
+      </div>
+
+      <div class="templates-section">
+        <div class="form-label glow-text">Быстрые шаблоны:</div>
+        <div class="template-list" id="templateList"></div>
+      </div>
+
+      <div class="form-actions">
+        <button class="btn glow-text" id="saveDraftBtn">Сохранить черновик</button>
+        <button class="btn btn-primary glow-text" id="publishBtn">Опубликовать</button>
+      </div>
+
+      <div class="history-section">
+        <div class="form-label glow-text">История версий:</div>
+        <div id="historyList"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- New User Modal -->
+  <div class="modal-overlay" id="newUserModal">
+    <div class="modal glow-border" style="max-width: 500px;">
+      <div class="modal-header">
+        <div class="modal-title glow-text">Создать участника</div>
+        <button class="close-btn glow-text" id="closeNewUserBtn">×</button>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label glow-text">Логин (username):</label>
+        <input type="text" class="form-input glow-text" id="newUsername" placeholder="user1">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label glow-text">Никнейм (отображаемое имя):</label>
+        <input type="text" class="form-input glow-text" id="newNickname" placeholder="Иван">
+      </div>
+
+      <div class="form-actions">
+        <button class="btn glow-text" id="cancelNewUserBtn">Отмена</button>
+        <button class="btn btn-primary glow-text" id="createUserBtn">Создать</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Link Modal -->
+  <div class="modal-overlay" id="linkModal">
+    <div class="modal glow-border" style="max-width: 520px;">
+      <div class="modal-header">
+        <div class="modal-title glow-text">Вставить ссылку</div>
+        <button class="close-btn glow-text" id="closeLinkBtn">×</button>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label glow-text">Текст ссылки:</label>
+        <input type="text" class="form-input glow-text" id="linkTextInput" placeholder="Например: жми сюда">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label glow-text">Адрес (URL):</label>
+        <input type="text" class="form-input glow-text" id="linkUrlInput" placeholder="ok.ru или https://ok.ru">
+        <div class="field-hint glow-text" id="linkUrlHint">Можно без «https://» — допишем сами.</div>
+      </div>
+
+      <div class="form-actions">
+        <button class="btn glow-text" id="cancelLinkBtn">Отмена</button>
+        <button class="btn btn-primary glow-text" id="applyLinkBtn">Вставить</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Templates Modal -->
+  <div class="modal-overlay" id="templatesModal">
+    <div class="modal glow-border">
+      <div class="modal-header">
+        <div class="modal-title glow-text">Управление шаблонами</div>
+        <button class="close-btn glow-text" id="closeTemplatesBtn">×</button>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label glow-text">Название шаблона:</label>
+        <input type="text" class="form-input glow-text" id="templateName" placeholder="Мой шаблон">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label glow-text">Содержимое:</label>
+        <div class="editor-content glow-border glow-text" id="templateEditor" contenteditable="true" style="min-height: 150px;"></div>
+      </div>
+
+      <div class="form-actions">
+        <button class="btn btn-primary glow-text" id="saveTemplateBtn">Сохранить шаблон</button>
+      </div>
+
+      <div class="history-section">
+        <div class="form-label glow-text">Сохранённые шаблоны:</div>
+        <div id="savedTemplatesList"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast glow-text" id="toast"></div>
+
+  <script type="module" src="/js/admin.js"></script>
+</body>
+</html>

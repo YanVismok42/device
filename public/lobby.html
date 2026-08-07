@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Лобби</title>
+  <link rel="stylesheet" href="/css/common.css">
+  <style>
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .lobby-header {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 60px;
+      background: rgba(15, 15, 15, 0.9);
+      backdrop-filter: blur(8px);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 30px;
+      z-index: 100;
+      border-bottom: 1px solid rgba(153, 237, 255, 0.2);
+    }
+
+    .lobby-title {
+      font-size: 20px;
+      letter-spacing: 2px;
+    }
+
+    .connection-status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+    }
+
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #4caf50;
+      box-shadow: 0 0 10px rgba(76, 175, 80, 0.8);
+      animation: pulse 2s infinite;
+    }
+
+    .status-dot.disconnected {
+      background: #f44336;
+      box-shadow: 0 0 10px rgba(244, 67, 54, 0.8);
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .prescript-container {
+      margin-top: 100px;
+      max-width: 90%;
+      width: 800px;
+      min-height: 300px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #prescriptText {
+      font-size: 24px;
+      letter-spacing: 2px;
+      line-height: 1.6;
+      text-align: center;
+      user-select: none;
+      padding: 20px;
+    }
+
+    #prescriptText p, #prescriptText div {
+      margin-bottom: 0.8em;
+    }
+
+    #prescriptText strong, #prescriptText b {
+      font-weight: bold;
+      color: #b3f0ff;
+    }
+
+    #prescriptText em, #prescriptText i {
+      font-style: italic;
+      color: #99edff;
+    }
+
+    #prescriptText a {
+      color: #6fc3ff;
+      text-decoration: underline;
+      user-select: text;
+      pointer-events: auto;
+    }
+
+    #prescriptText ul, #prescriptText ol {
+      display: inline-block;
+      text-align: left;
+      margin: 0.4em 0 0.8em;
+      padding-left: 1.2em;
+    }
+
+    #prescriptText li {
+      margin-bottom: 0.3em;
+    }
+
+    #prescriptText a:hover {
+      color: #99edff;
+    }
+
+    .actions {
+      margin-top: 60px;
+      display: flex;
+      gap: 40px;
+    }
+
+    .action-btn {
+      font-size: 28px;
+      padding: 12px 40px;
+      border: 2px solid rgba(153, 237, 255, 0.4);
+      background: rgba(153, 237, 255, 0.05);
+      transition: all 0.2s;
+    }
+
+    .action-btn:hover:not(:disabled) {
+      background: rgba(153, 237, 255, 0.15);
+      border-color: rgba(153, 237, 255, 0.6);
+      transform: translateY(-2px);
+    }
+
+    .action-btn:disabled {
+      opacity: 0.2;
+    }
+
+    .waiting-message {
+      font-size: 18px;
+      opacity: 0.6;
+      margin-top: 100px;
+      text-align: center;
+    }
+
+    .status-note {
+      margin-top: 28px;
+      font-size: 20px;
+      letter-spacing: 2px;
+      color: #4caf50;
+      text-shadow: 0 0 12px rgba(76, 175, 80, 0.6);
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="lobby-header">
+    <div class="lobby-title glow-text" id="lobbyName">Загрузка...</div>
+    <div class="connection-status glow-text">
+      <div class="status-dot" id="statusDot"></div>
+      <span id="connectionText">Подключено</span>
+    </div>
+  </div>
+
+  <div class="prescript-container">
+    <div id="prescriptText" class="glow-text"></div>
+    <div class="actions" id="actions" style="display: none;">
+      <button class="action-btn glow-text" id="acknowledgedBtn">Ознакомлен</button>
+      <button class="action-btn glow-text" id="completedBtn">Выполнено</button>
+    </div>
+    <div class="status-note glow-text" id="statusNote"></div>
+    <div class="waiting-message glow-text" id="waitingMessage">
+      Ожидание прескрипта от Главного...
+    </div>
+  </div>
+
+  <script type="module">
+    import { ScrambleReveal } from '/js/scramble.js';
+
+    const scrambler = new ScrambleReveal();
+    const prescriptText = document.getElementById('prescriptText');
+    const actions = document.getElementById('actions');
+    const waitingMessage = document.getElementById('waitingMessage');
+    const lobbyName = document.getElementById('lobbyName');
+    const statusNote = document.getElementById('statusNote');
+    const statusDot = document.getElementById('statusDot');
+    const connectionText = document.getElementById('connectionText');
+    const acknowledgedBtn = document.getElementById('acknowledgedBtn');
+    const completedBtn = document.getElementById('completedBtn');
+
+    let ws = null;
+    let currentLobby = null;
+
+    // Get access token from URL
+    const token = window.location.pathname.split('/').pop();
+
+    // Authenticate
+    async function authenticate() {
+      try {
+        const res = await fetch('/api/lobby/access', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token })
+        });
+
+        if (!res.ok) throw new Error('Invalid token');
+
+        const data = await res.json();
+        currentLobby = data.lobby;
+        lobbyName.textContent = data.lobby.name;
+
+        if (data.lobby.prescript) {
+          showPreScript(data.lobby.prescript);
+        }
+
+        connectWebSocket();
+      } catch (err) {
+        prescriptText.textContent = 'Ошибка доступа';
+        waitingMessage.style.display = 'none';
+      }
+    }
+
+    function connectWebSocket() {
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${protocol}//${location.host}`);
+
+      ws.onopen = () => {
+        statusDot.classList.remove('disconnected');
+        connectionText.textContent = 'Подключено';
+      };
+
+      ws.onclose = () => {
+        statusDot.classList.add('disconnected');
+        connectionText.textContent = 'Отключено';
+        setTimeout(connectWebSocket, 3000);
+      };
+
+      ws.onerror = () => {
+        statusDot.classList.add('disconnected');
+        connectionText.textContent = 'Ошибка';
+      };
+
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'prescript_updated') {
+          showPreScript(msg.content);
+        }
+      };
+    }
+
+    // Прескрипт, пришедший в фоновую вкладку. Пока она скрыта, браузер не даёт
+    // requestAnimationFrame, и участник пропустил бы и текст, и звук — поэтому
+    // ждём возвращения на вкладку и только тогда играем появление.
+    let pendingHtml = null;
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState !== 'visible' || pendingHtml === null) return;
+      const html = pendingHtml;
+      pendingHtml = null;
+      showPreScript(html);
+    });
+
+    async function showPreScript(html) {
+      // Экран не трогаем, пока вкладка скрыта: иначе участник, вернувшись,
+      // застанет пустое поле без «ожидания» и без кнопок.
+      if (document.visibilityState === 'hidden') {
+        pendingHtml = html;
+        return;
+      }
+
+      waitingMessage.style.display = 'none';
+      actions.style.display = 'none';
+      prescriptText.style.display = 'block';
+
+      // Анимация скрамбла работает по плоскому тексту: разметку показываем в конце.
+      const probe = document.createElement('div');
+      probe.innerHTML = html;
+      const plainText = (probe.textContent || '').trim();
+
+      try {
+        await scrambler.reveal(plainText, {
+          scrambleTime: 0.5,
+          revealTime: 1.5,
+          onUpdate: (t) => prescriptText.textContent = t
+        });
+      } catch {
+        // Звук или анимация могли не завестись — прескрипт всё равно должен дойти.
+      }
+
+      // Возвращаем форматирование и ссылки.
+      prescriptText.innerHTML = html;
+
+      actions.style.display = 'flex';
+    }
+
+    async function updateStatus(status) {
+      acknowledgedBtn.disabled = true;
+      completedBtn.disabled = true;
+
+      try {
+        await fetch('/api/lobby/status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status })
+        });
+
+        const msg = status === 'acknowledged' ? '✓ Ознакомлен' : '✓ Выполнено';
+        statusNote.textContent = msg;
+        statusNote.style.display = 'block';
+        actions.style.display = 'none';
+
+        setTimeout(() => {
+          statusNote.style.display = 'none';
+          actions.style.display = 'flex';
+          acknowledgedBtn.disabled = false;
+          completedBtn.disabled = false;
+        }, 3000);
+      } catch (err) {
+        acknowledgedBtn.disabled = false;
+        completedBtn.disabled = false;
+      }
+    }
+
+    acknowledgedBtn.onclick = () => updateStatus('acknowledged');
+    completedBtn.onclick = () => updateStatus('completed');
+
+    authenticate();
+  </script>
+</body>
+</html>
