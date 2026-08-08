@@ -157,25 +157,36 @@
       display: none;
     }
 
-    /* Финал цикла: прескрипт выполнен, кнопки больше не вернутся. */
+    /* Растровый шрифт нужен только для отметки CLEAR, поэтому он объявлен
+       здесь, а не в common.css: остальные страницы его не грузят. */
+    @font-face {
+      font-family: "Silkscreen";
+      src: url("/fonts/silkscreen.woff2") format("woff2");
+      font-display: swap;
+    }
+
+    /* Финал цикла: прескрипт выполнен, кнопки больше не вернутся.
+       Начертание по референсу — мелкая белая надпись с мягким ореолом,
+       а не крупный заголовок. */
     .status-note.final {
-      margin-top: 48px;
-      font-size: 44px;
-      letter-spacing: 12px;
-      /* letter-spacing вешает лишний отступ справа от последней буквы —
+      margin-top: 56px;
+      font-family: "Silkscreen", "Pixel", monospace;
+      font-size: 22px;
+      letter-spacing: 3px;
+      /* letter-spacing вешает лишний отступ справа от последнего символа —
          сдвигаем текст обратно, иначе он смотрится левее центра. */
-      text-indent: 12px;
-      color: #cdf4ff;
+      text-indent: 3px;
+      color: #f4fcff;
       text-shadow:
-        0 0 14px rgba(153, 237, 255, 0.9),
-        0 0 34px rgba(153, 237, 255, 0.6),
-        0 0 70px rgba(0, 183, 235, 0.45);
-      animation: finalIn 0.9s ease-out;
+        0 0 6px rgba(255, 255, 255, 0.55),
+        0 0 16px rgba(153, 237, 255, 0.5),
+        0 0 34px rgba(0, 183, 235, 0.3);
+      animation: finalIn 1.4s ease-out;
     }
 
     @keyframes finalIn {
-      from { opacity: 0; letter-spacing: 32px; }
-      to { opacity: 1; letter-spacing: 12px; }
+      from { opacity: 0; }
+      to { opacity: 1; }
     }
   </style>
 </head>
@@ -339,7 +350,7 @@
       clearTimeout(statusTimer);
       actions.style.display = 'none';
       waitingMessage.style.display = 'none';
-      statusNote.textContent = 'CLEAR';
+      statusNote.textContent = '_CleAr_';
       statusNote.classList.add('final');
       statusNote.style.display = 'block';
     }
