@@ -1,232 +1,267 @@
-import { readFile, writeFile, rename, mkdir } from 'fs/promises';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
-import crypto from 'crypto';
+// Хранилище поверх SQLite внутри Durable Object. Набор методов повторяет
+// прошлую, файловую версию — маршруты в index.js менять из-за схемы не пришлось.
+//
+// Отличие: сессии тоже лежат в базе, а не в Map. Раньше перезапуск сервера
+// разлогинивал всех, теперь вход переживает и деплой, и спячку объекта.
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = join(__dirname, '..', 'data');
-const DB_FILE = join(DATA_DIR, 'db.json');
+import { hashPassword, randomHex } from './crypto.js';
 
 const MAX_HISTORY = 50;
+const ADMIN_SESSION_MAX_AGE = 7 * 24 * 60 * 60 * 1000;
+const USER_SESSION_MAX_AGE = 30 * 24 * 60 * 60 * 1000;
 
-export function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
-  const derived = crypto.scryptSync(password, salt, 64).toString('hex');
-  return `${salt}:${derived}`;
-}
+export { ADMIN_SESSION_MAX_AGE, USER_SESSION_MAX_AGE };
 
-export function verifyPassword(password, stored) {
-  if (typeof stored !== 'string' || !stored.includes(':')) return false;
-  const [salt, expected] = stored.split(':');
-  const derived = crypto.scryptSync(password, salt, 64).toString('hex');
-  const a = Buffer.from(derived, 'hex');
-  const b = Buffer.from(expected, 'hex');
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(a, b);
-}
-
-function initialData() {
-  // На хостинге пароль задаётся переменной ADMIN_PASSWORD. Локально, если её
-  // нет, остаётся admin123 — публиковать такую сборку в интернет нельзя.
-  const password = process.env.ADMIN_PASSWORD || 'admin123';
-  return {
-    admin: {
-      username: process.env.ADMIN_USERNAME || 'admin',
-      passwordHash: hashPassword(password)
-    },
-    users: [],
-    lobbies: [],
-    templates: []
-  };
-}
-
-class Store {
-  constructor() {
-    this.data = null;
-    // Последовательная очередь записи: без неё параллельные save() теряются.
-    this.writeChain = Promise.resolve();
+export class Store {
+  constructor(sql) {
+    this.sql = sql;
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS admin (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        username TEXT NOT NULL,
+        passwordHash TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        username TEXT NOT NULL,
+        nickname TEXT NOT NULL,
+        accessToken TEXT NOT NULL UNIQUE,
+        createdAt INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS lobbies (
+        id TEXT PRIMARY KEY,
+        userId TEXT NOT NULL,
+        name TEXT NOT NULL,
+        content TEXT NOT NULL DEFAULT '',
+        draft TEXT NOT NULL DEFAULT '',
+        published INTEGER NOT NULL DEFAULT 0,
+        publishedAt INTEGER,
+        status TEXT NOT NULL DEFAULT 'pending',
+        statusAt INTEGER,
+        createdAt INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        lobbyId TEXT NOT NULL,
+        content TEXT NOT NULL,
+        publishedAt INTEGER,
+        archivedAt INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS templates (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        content TEXT NOT NULL,
+        createdAt INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS sessions (
+        token TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
+        refId TEXT NOT NULL,
+        createdAt INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_lobbies_user ON lobbies(userId);
+      CREATE INDEX IF NOT EXISTS idx_history_lobby ON history(lobbyId);
+    `);
   }
 
-  async init() {
-    await mkdir(DATA_DIR, { recursive: true });
-    try {
-      this.data = JSON.parse(await readFile(DB_FILE, 'utf-8'));
-    } catch {
-      this.data = initialData();
-      await this.save();
-    }
+  /**
+   * Заводит запись админа, если её ещё нет. Пароль берётся из секрета
+   * ADMIN_PASSWORD; без него запись не создаётся и вход невозможен — фолбэка
+   * намеренно нет, иначе сборка в интернете пускала бы кого угодно.
+   */
+  async ensureAdmin(username, password) {
+    const existing = this.sql.exec('SELECT id FROM admin WHERE id = 1;').toArray();
+    if (existing.length || !password) return;
+    this.sql.exec(
+      'INSERT INTO admin (id, username, passwordHash) VALUES (1, ?, ?);',
+      username || 'admin',
+      await hashPassword(password)
+    );
   }
 
-  save() {
-    this.writeChain = this.writeChain.then(async () => {
-      const tmp = `${DB_FILE}.tmp`;
-      await writeFile(tmp, JSON.stringify(this.data, null, 2), 'utf-8');
-      await rename(tmp, DB_FILE);
-    }).catch(err => {
-      console.error('Ошибка записи БД:', err);
-    });
-    return this.writeChain;
-  }
-
-  // ---- Админ ----
   getAdmin() {
-    return this.data.admin;
+    return this.sql.exec('SELECT username, passwordHash FROM admin WHERE id = 1;').toArray()[0] || null;
   }
 
-  setAdminPassword(password) {
-    this.data.admin.passwordHash = hashPassword(password);
-    return this.save();
+  // ---- Сессии ----
+  createSession(type, refId) {
+    const token = randomHex(32);
+    this.sql.exec(
+      'INSERT INTO sessions (token, type, refId, createdAt) VALUES (?, ?, ?, ?);',
+      token, type, refId, Date.now()
+    );
+    return token;
+  }
+
+  /** Возвращает сессию, попутно удаляя её, если срок вышел. */
+  getSession(token) {
+    if (!token) return null;
+    const row = this.sql.exec('SELECT * FROM sessions WHERE token = ?;', token).toArray()[0];
+    if (!row) return null;
+    const maxAge = row.type === 'admin' ? ADMIN_SESSION_MAX_AGE : USER_SESSION_MAX_AGE;
+    if (Date.now() - row.createdAt > maxAge) {
+      this.sql.exec('DELETE FROM sessions WHERE token = ?;', token);
+      return null;
+    }
+    return { type: row.type, id: row.refId };
   }
 
   // ---- Участники ----
   getUsers() {
-    return this.data.users;
-  }
-
-  getUser(id) {
-    return this.data.users.find(u => u.id === id);
+    return this.sql.exec('SELECT * FROM users ORDER BY createdAt;').toArray();
   }
 
   getUserByToken(token) {
     if (!token) return null;
-    return this.data.users.find(u => u.accessToken === token) || null;
+    return this.sql.exec('SELECT * FROM users WHERE accessToken = ?;', token).toArray()[0] || null;
   }
 
   usernameTaken(username) {
-    const key = String(username).toLowerCase();
-    return this.data.users.some(u => u.username.toLowerCase() === key);
+    return this.sql.exec(
+      'SELECT id FROM users WHERE lower(username) = lower(?);', String(username)
+    ).toArray().length > 0;
   }
 
   /** Создаёт участника вместе с его персональным лобби. */
-  async createUser(username, nickname, password) {
+  createUser(username, nickname) {
+    const now = Date.now();
     const user = {
-      id: crypto.randomBytes(8).toString('hex'),
+      id: randomHex(8),
       username,
       nickname,
-      accessToken: crypto.randomBytes(24).toString('hex'),
-      passwordHash: password ? hashPassword(password) : null,
-      createdAt: Date.now()
+      accessToken: randomHex(24),
+      createdAt: now
     };
-    this.data.users.push(user);
+    this.sql.exec(
+      'INSERT INTO users (id, username, nickname, accessToken, createdAt) VALUES (?, ?, ?, ?, ?);',
+      user.id, user.username, user.nickname, user.accessToken, user.createdAt
+    );
 
-    const lobby = {
-      id: crypto.randomBytes(8).toString('hex'),
-      userId: user.id,
-      name: `Lobby #${String(this.data.lobbies.length + 1).padStart(2, '0')} - ${nickname}`,
-      prescript: { content: '', draft: '', published: false, publishedAt: null },
-      status: 'pending',
-      history: [],
-      createdAt: Date.now()
-    };
-    this.data.lobbies.push(lobby);
+    const count = this.sql.exec('SELECT COUNT(*) AS n FROM lobbies;').toArray()[0].n;
+    const lobbyId = randomHex(8);
+    this.sql.exec(
+      'INSERT INTO lobbies (id, userId, name, createdAt) VALUES (?, ?, ?, ?);',
+      lobbyId, user.id, `Lobby #${String(count + 1).padStart(2, '0')} - ${nickname}`, now
+    );
 
-    await this.save();
-    return { user, lobby };
+    return { user, lobby: this.getLobby(lobbyId) };
   }
 
-  async deleteUser(id) {
-    const idx = this.data.users.findIndex(u => u.id === id);
-    if (idx === -1) return false;
-    this.data.users.splice(idx, 1);
-    this.data.lobbies = this.data.lobbies.filter(l => l.userId !== id);
-    await this.save();
-    return true;
-  }
-
-  async rotateAccessToken(userId) {
-    const user = this.getUser(userId);
-    if (!user) return null;
-    user.accessToken = crypto.randomBytes(24).toString('hex');
-    await this.save();
-    return user.accessToken;
+  deleteUser(id) {
+    const lobbies = this.sql.exec('SELECT id FROM lobbies WHERE userId = ?;', id).toArray();
+    for (const l of lobbies) {
+      this.sql.exec('DELETE FROM history WHERE lobbyId = ?;', l.id);
+    }
+    this.sql.exec('DELETE FROM lobbies WHERE userId = ?;', id);
+    this.sql.exec("DELETE FROM sessions WHERE type = 'user' AND refId = ?;", id);
+    const existed = this.sql.exec('SELECT COUNT(*) AS n FROM users WHERE id = ?;', id).toArray()[0].n;
+    this.sql.exec('DELETE FROM users WHERE id = ?;', id);
+    return existed > 0;
   }
 
   // ---- Лобби ----
+  /** Собирает лобби в той же форме, что отдавала файловая версия. */
+  #shape(row) {
+    if (!row) return null;
+    return {
+      id: row.id,
+      userId: row.userId,
+      name: row.name,
+      prescript: {
+        content: row.content,
+        draft: row.draft,
+        published: row.published === 1,
+        publishedAt: row.publishedAt
+      },
+      status: row.status,
+      statusAt: row.statusAt,
+      createdAt: row.createdAt
+    };
+  }
+
   getLobbies() {
-    return this.data.lobbies;
+    return this.sql.exec('SELECT * FROM lobbies;').toArray().map(r => this.#shape(r));
   }
 
   getLobby(id) {
-    return this.data.lobbies.find(l => l.id === id);
+    return this.#shape(this.sql.exec('SELECT * FROM lobbies WHERE id = ?;', id).toArray()[0]);
   }
 
   getLobbyByUserId(userId) {
-    return this.data.lobbies.find(l => l.userId === userId);
+    return this.#shape(this.sql.exec('SELECT * FROM lobbies WHERE userId = ?;', userId).toArray()[0]);
   }
 
-  async renameLobby(id, name) {
-    const lobby = this.getLobby(id);
-    if (!lobby) return null;
-    lobby.name = name;
-    await this.save();
-    return lobby;
+  renameLobby(id, name) {
+    this.sql.exec('UPDATE lobbies SET name = ? WHERE id = ?;', name, id);
+    return this.getLobby(id);
   }
 
-  async saveDraft(lobbyId, draft) {
+  saveDraft(lobbyId, draft) {
     const lobby = this.getLobby(lobbyId);
     if (!lobby) return null;
-    lobby.prescript.draft = draft;
-    lobby.prescript.published = draft === lobby.prescript.content;
-    await this.save();
-    return lobby;
+    // published здесь значит «опубликованное совпадает с черновиком»,
+    // то есть несохранённых правок нет.
+    const published = draft === lobby.prescript.content ? 1 : 0;
+    this.sql.exec('UPDATE lobbies SET draft = ?, published = ? WHERE id = ?;', draft, published, lobbyId);
+    return this.getLobby(lobbyId);
   }
 
-  /** Публикует черновик: прошлая версия уходит в историю, статус сбрасывается. */
-  async publish(lobbyId, content) {
+  /** Публикует прескрипт: прошлая версия уходит в историю, статус сбрасывается. */
+  publish(lobbyId, content) {
     const lobby = this.getLobby(lobbyId);
     if (!lobby) return null;
 
     if (lobby.prescript.content) {
-      lobby.history.unshift({
-        content: lobby.prescript.content,
-        publishedAt: lobby.prescript.publishedAt,
-        archivedAt: Date.now()
-      });
-      lobby.history = lobby.history.slice(0, MAX_HISTORY);
+      this.sql.exec(
+        'INSERT INTO history (lobbyId, content, publishedAt, archivedAt) VALUES (?, ?, ?, ?);',
+        lobbyId, lobby.prescript.content, lobby.prescript.publishedAt, Date.now()
+      );
+      // Держим только последние MAX_HISTORY записей на лобби.
+      this.sql.exec(
+        `DELETE FROM history WHERE lobbyId = ?1 AND id NOT IN (
+           SELECT id FROM history WHERE lobbyId = ?1 ORDER BY archivedAt DESC LIMIT ${MAX_HISTORY}
+         );`,
+        lobbyId
+      );
     }
 
-    lobby.prescript.content = content;
-    lobby.prescript.draft = content;
-    lobby.prescript.published = true;
-    lobby.prescript.publishedAt = Date.now();
-    lobby.status = 'active';
-
-    await this.save();
-    return lobby;
+    this.sql.exec(
+      `UPDATE lobbies SET content = ?, draft = ?, published = 1, publishedAt = ?, status = 'active'
+       WHERE id = ?;`,
+      content, content, Date.now(), lobbyId
+    );
+    return this.getLobby(lobbyId);
   }
 
-  async setStatus(lobbyId, status) {
-    const lobby = this.getLobby(lobbyId);
-    if (!lobby) return null;
-    lobby.status = status;
-    lobby.statusAt = Date.now();
-    await this.save();
-    return lobby;
+  setStatus(lobbyId, status) {
+    this.sql.exec('UPDATE lobbies SET status = ?, statusAt = ? WHERE id = ?;', status, Date.now(), lobbyId);
+    return this.getLobby(lobbyId);
+  }
+
+  getHistory(lobbyId) {
+    return this.sql.exec(
+      'SELECT content, publishedAt, archivedAt FROM history WHERE lobbyId = ? ORDER BY archivedAt DESC;',
+      lobbyId
+    ).toArray();
   }
 
   // ---- Шаблоны ----
   getTemplates() {
-    return this.data.templates;
+    return this.sql.exec('SELECT * FROM templates ORDER BY createdAt;').toArray();
   }
 
-  async createTemplate(name, content) {
-    const template = {
-      id: crypto.randomBytes(8).toString('hex'),
-      name,
-      content,
-      createdAt: Date.now()
-    };
-    this.data.templates.push(template);
-    await this.save();
+  createTemplate(name, content) {
+    const template = { id: randomHex(8), name, content, createdAt: Date.now() };
+    this.sql.exec(
+      'INSERT INTO templates (id, name, content, createdAt) VALUES (?, ?, ?, ?);',
+      template.id, template.name, template.content, template.createdAt
+    );
     return template;
   }
 
-  async deleteTemplate(id) {
-    const idx = this.data.templates.findIndex(t => t.id === id);
-    if (idx === -1) return false;
-    this.data.templates.splice(idx, 1);
-    await this.save();
-    return true;
+  deleteTemplate(id) {
+    const existed = this.sql.exec('SELECT COUNT(*) AS n FROM templates WHERE id = ?;', id).toArray()[0].n;
+    this.sql.exec('DELETE FROM templates WHERE id = ?;', id);
+    return existed > 0;
   }
 }
-
-export const store = new Store();

@@ -1,55 +1,38 @@
-import { createServer } from 'http';
-import { readFile } from 'fs/promises';
-import { join, dirname, extname } from 'path';
-import { fileURLToPath } from 'url';
-import { WebSocketServer } from 'ws';
-import crypto from 'crypto';
-import { store, verifyPassword } from './store.js';
+// Точка входа Worker + Durable Object «Hub».
+//
+// Вся логика живёт внутри Hub: там и SQLite-база, и открытые WebSocket-и.
+// Экземпляр один на всё приложение (getByName('main')), поэтому презенс
+// и данные всегда согласованы — никаких гонок между репликами.
+//
+// Worker снаружи занят одним: доводит запрос до Hub, а статику отдаёт мимо.
+
+import { DurableObject } from 'cloudflare:workers';
+import { Store, ADMIN_SESSION_MAX_AGE, USER_SESSION_MAX_AGE } from './store.js';
+import { verifyPassword } from './crypto.js';
 import { sanitizeHtml, htmlToPreview } from './sanitize.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PORT = process.env.PORT || 3000;
-
-// Simple session store (in-memory)
-const sessions = new Map();
-const ADMIN_SESSION_MAX_AGE = 7 * 24 * 60 * 60 * 1000; // 7 days
-const USER_SESSION_MAX_AGE = 30 * 24 * 60 * 60 * 1000; // 30 days
-
-function createSession(type, id) {
-  const token = crypto.randomBytes(32).toString('hex');
-  sessions.set(token, { type, id, createdAt: Date.now() });
-  return token;
-}
-
-function getSession(token) {
-  const session = sessions.get(token);
-  if (!session) return null;
-  const maxAge = session.type === 'admin' ? ADMIN_SESSION_MAX_AGE : USER_SESSION_MAX_AGE;
-  if (Date.now() - session.createdAt > maxAge) {
-    sessions.delete(token);
-    return null;
-  }
-  return session;
-}
-
-function parseCookies(cookieHeader) {
-  const cookies = {};
-  if (!cookieHeader) return cookies;
-  cookieHeader.split(';').forEach(cookie => {
-    const [name, ...rest] = cookie.split('=');
-    cookies[name?.trim()] = rest.join('=').trim();
+const json = (data, status = 200, headers = {}) =>
+  new Response(JSON.stringify(data), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...headers }
   });
+
+function parseCookies(header) {
+  const cookies = {};
+  if (!header) return cookies;
+  for (const part of header.split(';')) {
+    const [name, ...rest] = part.split('=');
+    if (name) cookies[name.trim()] = rest.join('=').trim();
+  }
   return cookies;
 }
 
 /**
- * Собирает Set-Cookie. На хостинге запрос приходит на прокси по HTTPS, а до
- * приложения доходит по HTTP — реальную схему знает только x-forwarded-proto.
- * Без Secure браузер отдал бы сессию и по открытому каналу.
+ * Собирает Set-Cookie. На Workers соединение всегда HTTPS, поэтому Secure
+ * ставим безусловно — кроме локального wrangler dev, который работает по http
+ * и такую куку просто не сохранил бы.
  */
-function sessionCookie(name, token, maxAge, req) {
-  const proto = req.headers['x-forwarded-proto'] || 'http';
-  const https = proto.split(',')[0].trim() === 'https';
+function sessionCookie(name, token, maxAge, url) {
   const parts = [
     `${name}=${token}`,
     'HttpOnly',
@@ -57,376 +40,278 @@ function sessionCookie(name, token, maxAge, req) {
     'SameSite=Lax',
     `Max-Age=${maxAge / 1000}`
   ];
-  if (https) parts.push('Secure');
+  if (url.protocol === 'https:') parts.push('Secure');
   return parts.join('; ');
 }
 
-// MIME types
-const MIME_TYPES = {
-  '.html': 'text/html',
-  '.css': 'text/css',
-  '.js': 'text/javascript',
-  '.json': 'application/json',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.svg': 'image/svg+xml',
-  '.mp3': 'audio/mpeg',
-  '.woff2': 'font/woff2',
-  '.woff': 'font/woff'
-};
-
-const server = createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host}`);
-
-  // CORS
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204);
-    res.end();
-    return;
+export class Hub extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    this.store = new Store(ctx.storage.sql);
+    // Пароль задаётся секретом ADMIN_PASSWORD. Запись админа появляется при
+    // первом обращении, если её ещё нет.
+    ctx.blockConcurrencyWhile(async () => {
+      await this.store.ensureAdmin(env.ADMIN_USERNAME, env.ADMIN_PASSWORD);
+    });
   }
 
-  // Parse cookies
-  const cookies = parseCookies(req.headers.cookie);
-  const adminSession = getSession(cookies.admin_session);
-  const userSession = getSession(cookies.user_session);
+  async fetch(request) {
+    const url = new URL(request.url);
+    if (url.pathname === '/ws') return this.#handleUpgrade(request);
 
-  // API Routes
-  if (url.pathname.startsWith('/api/')) {
-    res.setHeader('Content-Type', 'application/json');
+    const cookies = parseCookies(request.headers.get('Cookie'));
+    const admin = this.store.getSession(cookies.admin_session);
+    const user = this.store.getSession(cookies.user_session);
 
-    // Admin login
-    if (url.pathname === '/api/admin/login' && req.method === 'POST') {
-      let body = '';
-      req.on('data', chunk => body += chunk);
-      req.on('end', () => {
-        const { username, password } = JSON.parse(body);
-        const admin = store.getAdmin();
+    try {
+      return await this.#route(request, url, admin, user);
+    } catch (err) {
+      console.error('Ошибка обработки запроса:', err);
+      return json({ error: 'Internal error' }, 500);
+    }
+  }
 
-        if (username === admin.username && verifyPassword(password, admin.passwordHash)) {
-          const token = createSession('admin', 'admin');
-          res.setHeader('Set-Cookie', sessionCookie('admin_session', token, ADMIN_SESSION_MAX_AGE, req));
-          res.writeHead(200);
-          res.end(JSON.stringify({ success: true }));
-        } else {
-          res.writeHead(401);
-          res.end(JSON.stringify({ error: 'Invalid credentials' }));
-        }
+  // ---- Маршруты API ----
+  async #route(request, url, admin, user) {
+    const { pathname } = url;
+    const method = request.method;
+
+    // Вход Главного
+    if (pathname === '/api/admin/login' && method === 'POST') {
+      const { username, password } = await request.json();
+      const record = this.store.getAdmin();
+      // Записи нет — значит ADMIN_PASSWORD не задан, входить не во что.
+      if (!record) return json({ error: 'Admin is not configured' }, 503);
+      if (username !== record.username || !(await verifyPassword(password, record.passwordHash))) {
+        return json({ error: 'Invalid credentials' }, 401);
+      }
+      const token = this.store.createSession('admin', 'admin');
+      return json({ success: true }, 200, {
+        'Set-Cookie': sessionCookie('admin_session', token, ADMIN_SESSION_MAX_AGE, url)
       });
-      return;
     }
 
-    // Admin routes (require auth)
-    if (url.pathname.startsWith('/api/admin/') && !adminSession) {
-      res.writeHead(401);
-      res.end(JSON.stringify({ error: 'Unauthorized' }));
-      return;
+    // Всё под /api/admin/ требует сессии Главного
+    if (pathname.startsWith('/api/admin/') && !admin) {
+      return json({ error: 'Unauthorized' }, 401);
     }
 
-    // Get all users and lobbies
-    if (url.pathname === '/api/admin/overview' && req.method === 'GET' && adminSession) {
-      const users = store.getUsers();
-      const lobbies = store.getLobbies();
-      const overview = users.map(user => {
-        const lobby = lobbies.find(l => l.userId === user.id);
+    if (pathname === '/api/admin/overview' && method === 'GET') {
+      const lobbies = this.store.getLobbies();
+      const overview = this.store.getUsers().map(u => {
+        const lobby = lobbies.find(l => l.userId === u.id);
         return {
-          userId: user.id,
-          accessToken: user.accessToken,
-          username: user.username,
-          nickname: user.nickname,
+          userId: u.id,
+          accessToken: u.accessToken,
+          username: u.username,
+          nickname: u.nickname,
           lobbyId: lobby?.id,
           lobbyName: lobby?.name,
           status: lobby?.status || 'pending',
-          online: lobby ? isLobbyOnline(lobby.id) : false,
+          online: lobby ? this.#isOnline(lobby.id) : false,
           statusAt: lobby?.statusAt || null,
           publishedAt: lobby?.prescript?.publishedAt || null,
           prescript: htmlToPreview(lobby?.prescript?.content || ''),
           draft: lobby?.prescript?.draft || ''
         };
       });
-      res.writeHead(200);
-      res.end(JSON.stringify(overview));
-      return;
+      return json(overview);
     }
 
-    // Create user
-    if (url.pathname === '/api/admin/users' && req.method === 'POST' && adminSession) {
-      let body = '';
-      req.on('data', chunk => body += chunk);
-      req.on('end', async () => {
-        const { username, nickname } = JSON.parse(body);
-
-        if (store.usernameTaken(username)) {
-          res.writeHead(409);
-          res.end(JSON.stringify({ error: 'Username already taken' }));
-          return;
-        }
-
-        const { user, lobby } = await store.createUser(username, nickname);
-
-        res.writeHead(201);
-        res.end(JSON.stringify({ user, lobby, accessUrl: `/lobby/${user.accessToken}` }));
-
-        broadcastToAdmin({ type: 'user_created', user, lobby });
-      });
-      return;
-    }
-
-    // Delete user
-    if (url.pathname.match(/^\/api\/admin\/users\/[^/]+$/) && req.method === 'DELETE' && adminSession) {
-      const userId = url.pathname.split('/').pop();
-      const success = await store.deleteUser(userId);
-      res.writeHead(success ? 200 : 404);
-      res.end(JSON.stringify({ success }));
-
-      if (success) broadcastToAdmin({ type: 'user_deleted', userId });
-      return;
-    }
-
-    // Update lobby draft
-    if (url.pathname.match(/^\/api\/admin\/lobbies\/[^/]+$/) && req.method === 'PUT' && adminSession) {
-      const lobbyId = url.pathname.split('/').pop();
-      let body = '';
-      req.on('data', chunk => body += chunk);
-      req.on('end', async () => {
-        const updates = JSON.parse(body);
-        if (updates.draft !== undefined) {
-          // Черновик тоже чистим: он возвращается в редактор Главного и уходит в публикацию.
-          await store.saveDraft(lobbyId, sanitizeHtml(updates.draft));
-        }
-        if (updates.name !== undefined) {
-          await store.renameLobby(lobbyId, updates.name);
-        }
-        const lobby = store.getLobby(lobbyId);
-        res.writeHead(200);
-        res.end(JSON.stringify(lobby));
-      });
-      return;
-    }
-
-    // Publish prescript
-    if (url.pathname.match(/^\/api\/admin\/lobbies\/[^/]+\/publish$/) && req.method === 'POST' && adminSession) {
-      const lobbyId = url.pathname.split('/')[4];
-      let body = '';
-      req.on('data', chunk => body += chunk);
-      req.on('end', async () => {
-        const { content } = JSON.parse(body);
-        const sanitized = sanitizeHtml(content);
-        await store.publish(lobbyId, sanitized);
-        const lobby = store.getLobby(lobbyId);
-        res.writeHead(200);
-        res.end(JSON.stringify(lobby));
-
-        broadcastToLobby(lobbyId, { type: 'prescript_updated', content: sanitized });
-      });
-      return;
-    }
-
-    // Get lobby history
-    if (url.pathname.match(/^\/api\/admin\/lobbies\/[^/]+\/history$/) && req.method === 'GET' && adminSession) {
-      const lobbyId = url.pathname.split('/')[4];
-      const lobby = store.getLobby(lobbyId);
-      res.writeHead(200);
-      res.end(JSON.stringify(lobby?.history || []));
-      return;
-    }
-
-    // Templates
-    if (url.pathname === '/api/admin/templates' && req.method === 'GET' && adminSession) {
-      res.writeHead(200);
-      res.end(JSON.stringify(store.getTemplates()));
-      return;
-    }
-
-    if (url.pathname === '/api/admin/templates' && req.method === 'POST' && adminSession) {
-      let body = '';
-      req.on('data', chunk => body += chunk);
-      req.on('end', async () => {
-        const { name, content } = JSON.parse(body);
-        const template = await store.createTemplate(name, sanitizeHtml(content));
-        res.writeHead(201);
-        res.end(JSON.stringify(template));
-      });
-      return;
-    }
-
-    if (url.pathname.match(/^\/api\/admin\/templates\/[^/]+$/) && req.method === 'DELETE' && adminSession) {
-      const templateId = url.pathname.split('/').pop();
-      const success = await store.deleteTemplate(templateId);
-      res.writeHead(success ? 200 : 404);
-      res.end(JSON.stringify({ success }));
-      return;
-    }
-
-    // User lobby access
-    if (url.pathname === '/api/lobby/access' && req.method === 'POST') {
-      let body = '';
-      req.on('data', chunk => body += chunk);
-      req.on('end', () => {
-        const { token } = JSON.parse(body);
-        const user = store.getUserByToken(token);
-        if (!user) {
-          res.writeHead(404);
-          res.end(JSON.stringify({ error: 'Invalid token' }));
-          return;
-        }
-
-        const sessionToken = createSession('user', user.id);
-        const lobby = store.getLobbyByUserId(user.id);
-
-        res.setHeader('Set-Cookie', sessionCookie('user_session', sessionToken, USER_SESSION_MAX_AGE, req));
-        res.writeHead(200);
-        res.end(JSON.stringify({
-          user: { id: user.id, nickname: user.nickname },
-          lobby: {
-            id: lobby.id,
-            name: lobby.name,
-            prescript: lobby.prescript.content,
-            status: lobby.status
-          }
-        }));
-      });
-      return;
-    }
-
-    // User status update
-    if (url.pathname === '/api/lobby/status' && req.method === 'POST' && userSession) {
-      let body = '';
-      req.on('data', chunk => body += chunk);
-      req.on('end', async () => {
-        const { status } = JSON.parse(body);
-        const lobby = store.getLobbyByUserId(userSession.id);
-        if (lobby) {
-          await store.setStatus(lobby.id, status);
-          res.writeHead(200);
-          res.end(JSON.stringify({ success: true }));
-
-          broadcastToAdmin({ type: 'status_changed', lobbyId: lobby.id, status });
-        } else {
-          res.writeHead(404);
-          res.end(JSON.stringify({ error: 'Lobby not found' }));
-        }
-      });
-      return;
-    }
-
-    res.writeHead(404);
-    res.end(JSON.stringify({ error: 'Not found' }));
-    return;
-  }
-
-  // Static files
-  let filePath;
-  if (url.pathname === '/') {
-    filePath = '/public/login.html';
-  } else if (url.pathname === '/admin') {
-    filePath = '/public/admin.html';
-  } else if (url.pathname.startsWith('/lobby/')) {
-    filePath = '/public/lobby.html';
-  } else {
-    filePath = `/public${url.pathname}`;
-  }
-
-  try {
-    const fullPath = join(__dirname, '..', filePath);
-    const content = await readFile(fullPath);
-    const ext = extname(fullPath);
-    res.setHeader('Content-Type', MIME_TYPES[ext] || 'text/plain');
-    res.writeHead(200);
-    res.end(content);
-  } catch {
-    res.writeHead(404);
-    res.end('Not found');
-  }
-});
-
-// WebSocket
-const wss = new WebSocketServer({ server });
-const adminClients = new Set();
-const lobbyClients = new Map(); // lobbyId -> Set<ws>
-
-wss.on('connection', (ws, req) => {
-  const cookies = parseCookies(req.headers.cookie);
-  const adminSession = getSession(cookies.admin_session);
-  const userSession = getSession(cookies.user_session);
-
-  // Живо ли соединение. Без пинга «оборванный» участник (закрыл ноутбук,
-  // пропал вайфай) остался бы в таблице Главного онлайн навсегда.
-  ws.isAlive = true;
-  ws.on('pong', () => { ws.isAlive = true; });
-
-  if (adminSession) {
-    adminClients.add(ws);
-    ws.on('close', () => adminClients.delete(ws));
-  }
-  if (userSession) {
-    const lobby = store.getLobbyByUserId(userSession.id);
-    if (lobby) {
-      if (!lobbyClients.has(lobby.id)) lobbyClients.set(lobby.id, new Set());
-      lobbyClients.get(lobby.id).add(ws);
-      // Первая вкладка участника — лобби загорелось.
-      if (lobbyClients.get(lobby.id).size === 1) {
-        broadcastToAdmin({ type: 'presence_changed', lobbyId: lobby.id, online: true });
+    if (pathname === '/api/admin/users' && method === 'POST') {
+      const { username, nickname } = await request.json();
+      if (this.store.usernameTaken(username)) {
+        return json({ error: 'Username already taken' }, 409);
       }
-      ws.on('close', () => {
-        const set = lobbyClients.get(lobby.id);
-        if (!set) return;
-        set.delete(ws);
-        if (set.size === 0) {
-          lobbyClients.delete(lobby.id);
-          broadcastToAdmin({ type: 'presence_changed', lobbyId: lobby.id, online: false });
+      const { user: created, lobby } = this.store.createUser(username, nickname);
+      this.#toAdmins({ type: 'user_created', user: created, lobby });
+      return json({ user: created, lobby, accessUrl: `/lobby/${created.accessToken}` }, 201);
+    }
+
+    let m = pathname.match(/^\/api\/admin\/users\/([^/]+)$/);
+    if (m && method === 'DELETE') {
+      const success = this.store.deleteUser(m[1]);
+      if (success) this.#toAdmins({ type: 'user_deleted', userId: m[1] });
+      return json({ success }, success ? 200 : 404);
+    }
+
+    m = pathname.match(/^\/api\/admin\/lobbies\/([^/]+)$/);
+    if (m && method === 'PUT') {
+      const updates = await request.json();
+      // Черновик тоже чистим: он возвращается в редактор Главного и уходит в публикацию.
+      if (updates.draft !== undefined) this.store.saveDraft(m[1], sanitizeHtml(updates.draft));
+      if (updates.name !== undefined) this.store.renameLobby(m[1], updates.name);
+      return json(this.store.getLobby(m[1]));
+    }
+
+    m = pathname.match(/^\/api\/admin\/lobbies\/([^/]+)\/publish$/);
+    if (m && method === 'POST') {
+      const { content } = await request.json();
+      const sanitized = sanitizeHtml(content);
+      const lobby = this.store.publish(m[1], sanitized);
+      if (!lobby) return json({ error: 'Lobby not found' }, 404);
+      this.#toLobby(m[1], { type: 'prescript_updated', content: sanitized });
+      return json(lobby);
+    }
+
+    m = pathname.match(/^\/api\/admin\/lobbies\/([^/]+)\/history$/);
+    if (m && method === 'GET') return json(this.store.getHistory(m[1]));
+
+    if (pathname === '/api/admin/templates' && method === 'GET') {
+      return json(this.store.getTemplates());
+    }
+
+    if (pathname === '/api/admin/templates' && method === 'POST') {
+      const { name, content } = await request.json();
+      return json(this.store.createTemplate(name, sanitizeHtml(content)), 201);
+    }
+
+    m = pathname.match(/^\/api\/admin\/templates\/([^/]+)$/);
+    if (m && method === 'DELETE') {
+      const success = this.store.deleteTemplate(m[1]);
+      return json({ success }, success ? 200 : 404);
+    }
+
+    // ---- Лобби участника ----
+    if (pathname === '/api/lobby/access' && method === 'POST') {
+      const { token } = await request.json();
+      const found = this.store.getUserByToken(token);
+      if (!found) return json({ error: 'Invalid token' }, 404);
+
+      const lobby = this.store.getLobbyByUserId(found.id);
+      const sessionToken = this.store.createSession('user', found.id);
+      return json({
+        user: { id: found.id, nickname: found.nickname },
+        lobby: {
+          id: lobby.id,
+          name: lobby.name,
+          prescript: lobby.prescript.content,
+          status: lobby.status
         }
+      }, 200, {
+        'Set-Cookie': sessionCookie('user_session', sessionToken, USER_SESSION_MAX_AGE, url)
       });
+    }
+
+    if (pathname === '/api/lobby/status' && method === 'POST') {
+      if (!user) return json({ error: 'Unauthorized' }, 401);
+      const { status } = await request.json();
+      const lobby = this.store.getLobbyByUserId(user.id);
+      if (!lobby) return json({ error: 'Lobby not found' }, 404);
+      this.store.setStatus(lobby.id, status);
+      this.#toAdmins({ type: 'status_changed', lobbyId: lobby.id, status });
+      return json({ success: true });
+    }
+
+    return json({ error: 'Not found' }, 404);
+  }
+
+  // ---- WebSocket ----
+  /**
+   * Принимает соединение через Hibernation API: пока сообщений нет, объект
+   * выгружается из памяти, а соединения остаются живыми. Поэтому роль клиента
+   * нельзя держать в поле класса — она уходит в attachment, который выгрузку
+   * переживает.
+   */
+  #handleUpgrade(request) {
+    const url = new URL(request.url);
+    const cookies = parseCookies(request.headers.get('Cookie'));
+
+    // Роль приходит от клиента, а не выводится из набора кук: у Главного,
+    // открывшего лобби для проверки, куки обе сразу, и по ним не понять,
+    // из какой вкладки пришло соединение.
+    const wants = url.searchParams.get('role');
+    let role = null;
+    if (wants === 'admin' && this.store.getSession(cookies.admin_session)) {
+      role = { kind: 'admin' };
+    } else if (wants === 'lobby') {
+      const user = this.store.getSession(cookies.user_session);
+      const lobby = user && this.store.getLobbyByUserId(user.id);
+      if (lobby) role = { kind: 'lobby', lobbyId: lobby.id };
+    }
+    if (!role) return new Response('Unauthorized', { status: 401 });
+
+    const { 0: client, 1: server } = new WebSocketPair();
+    this.ctx.acceptWebSocket(server);
+    server.serializeAttachment(role);
+
+    if (role.kind === 'lobby' && this.#countLobby(role.lobbyId) === 1) {
+      // Первая вкладка участника — лобби загорелось.
+      this.#toAdmins({ type: 'presence_changed', lobbyId: role.lobbyId, online: true });
+    }
+
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  webSocketClose(ws) {
+    const role = ws.deserializeAttachment();
+    if (role?.kind !== 'lobby') return;
+    // Закрываемое соединение ещё числится в getWebSockets(), поэтому «последним»
+    // считается единица, а не ноль.
+    if (this.#countLobby(role.lobbyId) <= 1) {
+      this.#toAdmins({ type: 'presence_changed', lobbyId: role.lobbyId, online: false });
     }
   }
 
-  ws.on('error', () => ws.terminate());
-});
+  webSocketError(ws) {
+    this.webSocketClose(ws);
+  }
 
-// Раз в 30 секунд отсеиваем мёртвые соединения: terminate() поднимет 'close',
-// а он уже разберётся с presence.
-const heartbeat = setInterval(() => {
-  wss.clients.forEach(ws => {
-    if (ws.isAlive === false) {
-      ws.terminate();
-      return;
+  #sockets(match) {
+    return this.ctx.getWebSockets().filter(ws => {
+      if (ws.readyState !== WebSocket.READY_STATE_OPEN) return false;
+      return match(ws.deserializeAttachment());
+    });
+  }
+
+  #countLobby(lobbyId) {
+    return this.#sockets(r => r?.kind === 'lobby' && r.lobbyId === lobbyId).length;
+  }
+
+  #isOnline(lobbyId) {
+    return this.#countLobby(lobbyId) > 0;
+  }
+
+  #send(sockets, message) {
+    const data = JSON.stringify(message);
+    for (const ws of sockets) {
+      try {
+        ws.send(data);
+      } catch {
+        // Соединение отвалилось между проверкой и отправкой — не мешаем остальным.
+      }
     }
-    ws.isAlive = false;
-    try {
-      ws.ping();
-    } catch {
-      ws.terminate();
+  }
+
+  #toAdmins(message) {
+    this.#send(this.#sockets(r => r?.kind === 'admin'), message);
+  }
+
+  #toLobby(lobbyId, message) {
+    this.#send(this.#sockets(r => r?.kind === 'lobby' && r.lobbyId === lobbyId), message);
+  }
+}
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+
+    // Страницы: файлов с такими путями нет, отдаём нужный HTML из статики.
+    if (url.pathname === '/') return env.ASSETS.fetch(new URL('/login.html', url));
+    if (url.pathname === '/admin') return env.ASSETS.fetch(new URL('/admin.html', url));
+    if (url.pathname.startsWith('/lobby/')) return env.ASSETS.fetch(new URL('/lobby.html', url));
+
+    if (url.pathname === '/ws') {
+      if (request.headers.get('Upgrade') !== 'websocket') {
+        return new Response('Expected websocket', { status: 426 });
+      }
+      return env.HUB.getByName('main').fetch(request);
     }
-  });
-}, 30000);
 
-wss.on('close', () => clearInterval(heartbeat));
+    if (url.pathname.startsWith('/api/')) {
+      return env.HUB.getByName('main').fetch(request);
+    }
 
-function isLobbyOnline(lobbyId) {
-  const set = lobbyClients.get(lobbyId);
-  if (!set) return false;
-  return [...set].some(ws => ws.readyState === 1);
-}
-
-function broadcastToAdmin(message) {
-  const data = JSON.stringify(message);
-  adminClients.forEach(ws => {
-    if (ws.readyState === 1) ws.send(data);
-  });
-}
-
-function broadcastToLobby(lobbyId, message) {
-  const data = JSON.stringify(message);
-  lobbyClients.get(lobbyId)?.forEach(ws => {
-    if (ws.readyState === 1) ws.send(data);
-  });
-}
-
-// Start
-await store.init();
-server.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
-});
+    return env.ASSETS.fetch(request);
+  }
+};

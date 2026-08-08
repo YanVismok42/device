@@ -690,7 +690,7 @@ document.addEventListener('keydown', (e) => {
 // ---- WebSocket ----
 function connectWS() {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const ws = new WebSocket(`${protocol}//${location.host}`);
+  const ws = new WebSocket(`${protocol}//${location.host}/ws?role=admin`);
 
   ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);

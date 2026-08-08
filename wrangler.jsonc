@@ -1,0 +1,40 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+
+  // Имя определяет адрес: device.<поддомен>.workers.dev
+  "name": "device",
+  "main": "server/index.js",
+  "compatibility_date": "2026-08-01",
+
+  // Статика отдаётся из public/ напрямую, минуя Worker — это бесплатно и быстро.
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    // Эти пути обслуживает Worker: файлов с такими именами нет, а /lobby/ТОКЕН
+    // и вовсе динамический. Всё остальное (css, js) уходит клиенту напрямую.
+    "run_worker_first": ["/", "/admin", "/lobby/*", "/api/*", "/ws"]
+  },
+
+  // Один объект на всё приложение: внутри и база, и живые WebSocket-соединения.
+  // Экземпляр единственный (getByName), поэтому гонок за данные нет.
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "HUB",
+        "class_name": "Hub"
+      }
+    ]
+  },
+
+  // SQLite-хранилище: только оно доступно на бесплатном тарифе.
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["Hub"]
+    }
+  ],
+
+  "observability": {
+    "enabled": true
+  }
+}

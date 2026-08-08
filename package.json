@@ -1,15 +1,14 @@
 {
   "name": "prescript-manager",
-  "version": "1.0.0",
+  "version": "2.0.0",
+  "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --watch server/index.js",
-    "start": "node server/index.js"
+    "dev": "wrangler dev",
+    "start": "wrangler dev",
+    "deploy": "wrangler deploy"
   },
-  "engines": {
-    "node": ">=20"
-  },
-  "dependencies": {
-    "ws": "^8.18.0"
+  "devDependencies": {
+    "wrangler": "^4.42.0"
   }
 }

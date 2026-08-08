@@ -24,9 +24,11 @@
 
 ## Архитектура
 
-- **Backend**: Node.js + встроенные модули (http, ws), без внешних зависимостей кроме WebSocket
-- **Storage**: JSON-файл с атомарной записью (очередь `writeChain` для конкурентной безопасности)
-- **Auth**: scrypt-хеши паролей, signed HTTP-only cookies для сессий (раздельные для админа и участников)
+- **Хостинг**: Cloudflare Workers — сервер не засыпает и не имеет холодного старта
+- **Backend**: Worker + Durable Object `Hub`. Экземпляр один на всё приложение (`getByName('main')`), поэтому презенс и данные всегда согласованы
+- **Storage**: SQLite внутри Durable Object (`ctx.storage.sql`) — переживает деплой и перезапуск
+- **WebSocket**: Hibernation API (`ctx.acceptWebSocket`) — пока сообщений нет, объект выгружается из памяти, а соединения остаются живыми
+- **Auth**: PBKDF2-хеши паролей (WebCrypto, 100 000 итераций SHA-256), HTTP-only cookies для сессий (раздельные для админа и участников); сессии лежат в базе, поэтому вход переживает перезапуск
 - **XSS-защита**: санитайзер HTML в `server/sanitize.js` — оставляет только безопасные теги форматирования
 - **Изоляция**: у каждого участника свой уникальный токен; токен участника A не даёт доступ к лобби B
 
@@ -35,8 +37,9 @@
 ```
 .
 ├── server/
-│   ├── index.js          # HTTP + WebSocket сервер, маршрутизация API
-│   ├── store.js          # JSON-хранилище с API (users, lobbies, templates)
+│   ├── index.js          # Worker + Durable Object Hub, маршрутизация API и WebSocket
+│   ├── store.js          # Слой доступа к SQLite (admin, users, lobbies, history, templates, sessions)
+│   ├── crypto.js         # PBKDF2-хеширование паролей через WebCrypto
 │   └── sanitize.js       # Санитайзер HTML (strip XSS, оставляет форматирование)
 ├── public/
 │   ├── login.html        # Страница входа для админа
@@ -45,9 +48,9 @@
 │   ├── css/
 │   │   └── common.css    # Общие стили (гарнитура Pixel, cyan glow, badges)
 │   └── js/
+│       ├── admin.js      # Логика панели Главного
 │       └── scramble.js   # Движок scramble-reveal + WebAudio звук
-├── data/
-│   └── db.json           # База (создаётся автоматически)
+├── wrangler.jsonc        # Конфигурация Workers (Durable Object, статика, миграции)
 └── package.json
 ```
 
@@ -57,24 +60,52 @@
 
 - Node.js 18+ (проверено на 24.18.0)
 - npm 9+
+- Аккаунт Cloudflare (бесплатный, карта не нужна) — для публикации
 
-### Шаги
+### Локальный запуск
 
 ```bash
 git clone https://github.com/YanVismok42/device.git
 cd device
 npm install
-npm start
+npm run dev
 ```
 
-Сервер поднимется на **http://localhost:3000**.
+Сервер поднимется на **http://localhost:3000** (эмулятор Workers из wrangler).
+
+Логин и пароль для локального запуска берутся из файла `.dev.vars` в корне (в репозиторий он не идёт):
+
+```
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=свой-локальный-пароль
+```
+
+Локальная база лежит в `.wrangler/` — чтобы начать с нуля, удалите эту папку.
+
+### Публикация на Cloudflare
+
+```bash
+npx wrangler login
+npx wrangler secret put ADMIN_PASSWORD
+npm run deploy
+```
+
+- `wrangler login` откроет браузер и привяжет проект к вашему аккаунту
+- `secret put` спросит пароль Главного — он хранится на стороне Cloudflare, не в коде
+- после `deploy` адрес будет вида `device.ВАШ-ПОДДОМЕН.workers.dev`
+
+Логин Главного по умолчанию — `admin`. Чтобы задать другой, добавьте в `wrangler.jsonc`:
+
+```jsonc
+"vars": { "ADMIN_USERNAME": "нужный-логин" }
+```
 
 ### Первый вход
 
-1. Откройте **http://localhost:3000**
-2. Логин и пароль задаются переменными окружения `ADMIN_USERNAME` и `ADMIN_PASSWORD` при первом запуске — именно тогда создаётся `data/db.json`
-3. Если переменные не заданы, для локальной разработки используется `admin` / `admin123`. **В интернет такую сборку публиковать нельзя** — всегда задавайте `ADMIN_PASSWORD` на хостинге
-4. Чтобы сменить пароль на уже созданной базе, удалите `data/db.json` и запустите сервер заново с нужными переменными
+1. Откройте адрес приложения
+2. Введите логин (`admin`, если не меняли) и пароль из `ADMIN_PASSWORD`
+3. Запись администратора создаётся при первом обращении к приложению. Если `ADMIN_PASSWORD` не задан, вход отвечает `503 Admin is not configured` — пароля по умолчанию в коде нет
+4. Смена пароля на уже созданной базе: `npx wrangler secret put ADMIN_PASSWORD` пароль не перезапишет — запись админа уже есть. Понадобится либо удалить Durable Object, либо добавить отдельную ручку смены пароля
 
 ## Использование
 
@@ -289,7 +320,9 @@ npm start
 
 ### WebSocket
 
-**Endpoint:** `ws://localhost:3000`
+**Endpoint:** `ws://localhost:3000/ws?role=admin` или `/ws?role=lobby`
+
+Роль передаёт клиент, а сервер проверяет только соответствующую куку (`admin_session` для `admin`, `user_session` для `lobby`). Так сделано потому, что у Главного, открывшего лобби для проверки, в браузере лежат обе куки, и по одному их набору не понять, из какой вкладки пришло соединение. Соединение без нужной куки получает `401`.
 
 **Сообщения от сервера:**
 
@@ -298,6 +331,7 @@ npm start
 { "type": "user_created", "user": {...}, "lobby": {...} }
 { "type": "user_deleted", "userId": "..." }
 { "type": "status_changed", "lobbyId": "...", "status": "completed" }
+{ "type": "presence_changed", "lobbyId": "...", "online": true }
 ```
 
 #### Участнику:
@@ -309,24 +343,25 @@ npm start
 
 ### Реализовано
 
-- **Пароли**: хеши scrypt с 16-байтовой солью
-- **Сессии**: signed HttpOnly cookies, раздельные для админа и участников
-- **XSS**: санитайзер HTML удаляет `<script>`, `<iframe>`, `javascript:` href и другие опасные конструкции
+- **Пароли**: PBKDF2-SHA256, 100 000 итераций, 16-байтовая соль; сравнение хешей за постоянное время
+- **Сессии**: HttpOnly cookies в базе, раздельные для админа (7 дней) и участников (30 дней)
+- **XSS**: санитайзер HTML удаляет `<script>`, `<iframe>`, `javascript:` href и другие опасные конструкции. Черновики чистятся так же, как публикации
 - **Изоляция**: токены доступа длиной 24 байта, проверка на уровне API
+- **Роль WebSocket**: подтверждается кукой на сервере — подделать её параметром `?role=` нельзя
 
 ### Сделано для хостинга
 
-- **Пароль админа** задаётся через `ADMIN_PASSWORD`, в коде не хранится
-- **Порт** берётся из `PORT` — совместимо с Render, Railway, Fly.io
-- **Secure-cookies**: флаг `Secure` выставляется автоматически, когда запрос пришёл по HTTPS (определяется по `x-forwarded-proto` за прокси)
+- **Пароль админа** задаётся секретом `ADMIN_PASSWORD` на стороне Cloudflare, в коде не хранится. Пароля по умолчанию нет: без секрета вход отвечает `503`
+- **Secure-cookies**: флаг `Secure` выставляется, когда запрос пришёл по HTTPS (на Workers это всегда, кроме локального `wrangler dev`)
 - **WebSocket** сам переключается на `wss://` на HTTPS-страницах
+- **Данные не теряются**: SQLite Durable Object переживает деплой и перезапуск, в отличие от файловой системы бесплатных Node-хостингов
 
 ### Осталось для продакшена
 
 1. **Rate limiting**: защита входа от перебора пароля
 2. **CSP**: Content Security Policy header дополнительно к санитайзеру
-3. **Бэкапы**: автоматическое копирование `data/db.json`
-4. **Постоянный диск**: на бесплатных тарифах хостингов файловая система временная, база обнуляется при каждом деплое
+3. **Смена пароля**: сейчас запись админа создаётся один раз и ручки для смены нет
+4. **Бэкапы**: выгрузка базы Durable Object по расписанию
 
 ## Технические детали
 
@@ -350,22 +385,39 @@ npm start
 
 Всё остальное удаляется.
 
-### Конкурентная запись
+### Хранилище
 
-`store.js` использует `writeChain = Promise.resolve()` для последовательной записи:
+`server/store.js` работает с SQLite внутри Durable Object. Таблицы:
 
-```javascript
-save() {
-  this.writeChain = this.writeChain.then(async () => {
-    const tmp = `${DB_FILE}.tmp`;
-    await writeFile(tmp, JSON.stringify(this.data, null, 2), 'utf-8');
-    await rename(tmp, DB_FILE);
-  });
-  return this.writeChain;
+| Таблица | Назначение |
+|---|---|
+| `admin` | Единственная запись (`CHECK id = 1`): логин и PBKDF2-хеш пароля |
+| `users` | Участники: логин, никнейм, токен доступа |
+| `lobbies` | Лобби: имя, содержимое прескрипта, черновик, статус |
+| `history` | Прошлые версии прескриптов, до 50 на лобби |
+| `templates` | Шаблоны прескриптов |
+| `sessions` | Активные сессии админа и участников |
+
+Гонок при записи нет по устройству Durable Object: обращения к единственному экземпляру обрабатываются по одному, поэтому очередь записи из прошлой файловой версии больше не нужна.
+
+Наружу `store.js` отдаёт лобби в прежней форме — с вложенным объектом `prescript`, — поэтому фронтенд при переезде на Workers менять не пришлось:
+
+```json
+{
+  "id": "...",
+  "userId": "...",
+  "name": "Lobby #01 - Иван",
+  "prescript": {
+    "content": "<p>...</p>",
+    "draft": "",
+    "published": true,
+    "publishedAt": 1786019056211
+  },
+  "status": "active",
+  "statusAt": 1786019060000,
+  "createdAt": 1786018781585
 }
 ```
-
-Гарантирует, что параллельные `save()` не затрут друг друга.
 
 ## Стилистика
 
@@ -382,49 +434,26 @@ save() {
 npm run dev
 ```
 
-Использует `node --watch` (Node 18+).
+Поднимает эмулятор Workers (`wrangler dev`); правки в `server/` и `public/` подхватываются на ходу.
 
-### Структура данных (`data/db.json`)
+### Лимиты бесплатного тарифа Cloudflare
 
-```json
-{
-  "admin": {
-    "username": "admin",
-    "passwordHash": "salt:hash"
-  },
-  "users": [
-    {
-      "id": "...",
-      "username": "ivan",
-      "nickname": "Иван",
-      "accessToken": "...",
-      "passwordHash": null,
-      "createdAt": 1786018781585
-    }
-  ],
-  "lobbies": [
-    {
-      "id": "...",
-      "userId": "...",
-      "name": "Lobby #01 - Иван",
-      "prescript": {
-        "content": "<p>...</p>",
-        "draft": "",
-        "published": true,
-        "publishedAt": 1786019056211
-      },
-      "status": "active",
-      "history": [
-        { "content": "...", "publishedAt": 1786019000000, "archivedAt": 1786019056211 }
-      ],
-      "createdAt": 1786018781585
-    }
-  ],
-  "templates": [
-    { "id": "...", "name": "Шаблон приветствия", "content": "...", "createdAt": 1786018800000 }
-  ]
-}
+| Ресурс | Лимит |
+|---|---|
+| Запросы к Worker | 100 000 в сутки |
+| Чтение строк в Durable Object | 5 000 000 в сутки |
+| Запись строк | 100 000 в сутки |
+| Размер хранилища | 5 ГБ |
+
+Durable Objects на бесплатном тарифе доступны только с SQLite-бэкендом — отсюда `new_sqlite_classes` в миграции `wrangler.jsonc`.
+
+### Полезные команды
+
+```bash
+npx wrangler tail
 ```
+
+Живые логи опубликованного Worker.
 
 ## Лицензия
 
