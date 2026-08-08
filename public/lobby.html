@@ -156,6 +156,27 @@
       text-shadow: 0 0 12px rgba(76, 175, 80, 0.6);
       display: none;
     }
+
+    /* Финал цикла: прескрипт выполнен, кнопки больше не вернутся. */
+    .status-note.final {
+      margin-top: 48px;
+      font-size: 44px;
+      letter-spacing: 12px;
+      /* letter-spacing вешает лишний отступ справа от последней буквы —
+         сдвигаем текст обратно, иначе он смотрится левее центра. */
+      text-indent: 12px;
+      color: #cdf4ff;
+      text-shadow:
+        0 0 14px rgba(153, 237, 255, 0.9),
+        0 0 34px rgba(153, 237, 255, 0.6),
+        0 0 70px rgba(0, 183, 235, 0.45);
+      animation: finalIn 0.9s ease-out;
+    }
+
+    @keyframes finalIn {
+      from { opacity: 0; letter-spacing: 32px; }
+      to { opacity: 1; letter-spacing: 12px; }
+    }
   </style>
 </head>
 <body>
@@ -195,6 +216,10 @@
 
     let ws = null;
     let currentLobby = null;
+    // Цикл закрыт: участник нажал «Выполнено». Кнопки не вернутся, пока
+    // Главный не опубликует новый прескрипт.
+    let cycleDone = false;
+    let statusTimer = null;
 
     // Get access token from URL
     const token = window.location.pathname.split('/').pop();
@@ -213,6 +238,10 @@
         const data = await res.json();
         currentLobby = data.lobby;
         lobbyName.textContent = data.lobby.name;
+
+        // Статус хранится на сервере, поэтому перезагрузка страницы не даёт
+        // нажать «Выполнено» второй раз.
+        cycleDone = data.lobby.status === 'completed';
 
         if (data.lobby.prescript) {
           showPreScript(data.lobby.prescript);
@@ -248,6 +277,8 @@
       ws.onmessage = (event) => {
         const msg = JSON.parse(event.data);
         if (msg.type === 'prescript_updated') {
+          // Новый прескрипт — новый цикл, кнопки снова в деле.
+          cycleDone = false;
           showPreScript(msg.content);
         }
       };
@@ -276,6 +307,9 @@
       waitingMessage.style.display = 'none';
       actions.style.display = 'none';
       prescriptText.style.display = 'block';
+      clearTimeout(statusTimer);
+      statusNote.style.display = 'none';
+      statusNote.classList.remove('final');
 
       // Анимация скрамбла работает по плоскому тексту: разметку показываем в конце.
       const probe = document.createElement('div');
@@ -295,26 +329,49 @@
       // Возвращаем форматирование и ссылки.
       prescriptText.innerHTML = html;
 
-      actions.style.display = 'flex';
+      if (cycleDone) showFinal();
+      else actions.style.display = 'flex';
+    }
+
+    // «Выполнено» отработано: остаётся только отметка, кнопок нет.
+    function showFinal() {
+      cycleDone = true;
+      clearTimeout(statusTimer);
+      actions.style.display = 'none';
+      waitingMessage.style.display = 'none';
+      statusNote.textContent = 'CLEAR';
+      statusNote.classList.add('final');
+      statusNote.style.display = 'block';
     }
 
     async function updateStatus(status) {
       acknowledgedBtn.disabled = true;
       completedBtn.disabled = true;
+      // Отменяем возврат кнопок от предыдущего «Ознакомлен»: иначе он
+      // сработал бы уже поверх финальной отметки.
+      clearTimeout(statusTimer);
 
       try {
-        await fetch('/api/lobby/status', {
+        const res = await fetch('/api/lobby/status', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ status })
         });
+        // fetch не считает 4xx ошибкой — проверяем сами, иначе кнопки
+        // исчезли бы навсегда из-за неудачного запроса.
+        if (!res.ok) throw new Error('Сервер отклонил статус');
 
-        const msg = status === 'acknowledged' ? '✓ Ознакомлен' : '✓ Выполнено';
-        statusNote.textContent = msg;
+        if (status === 'completed') {
+          showFinal();
+          return;
+        }
+
+        statusNote.textContent = '✓ Ознакомлен';
+        statusNote.classList.remove('final');
         statusNote.style.display = 'block';
         actions.style.display = 'none';
 
-        setTimeout(() => {
+        statusTimer = setTimeout(() => {
           statusNote.style.display = 'none';
           actions.style.display = 'flex';
           acknowledgedBtn.disabled = false;
